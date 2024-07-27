@@ -1,0 +1,2 @@
+t_cuti_code=dbo.Hris_TCutiCode
+t_cuti_bersama=dbo.Hris_TCutiBersama
