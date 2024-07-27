@@ -58,7 +58,7 @@ class MssqlController extends Controller
         if ($map === false) {
             throw new InvalidArgumentException("Invalid '$name' parameter value.");
         }
-        /** @var Connection $dbHris */
+        /** @var Connection $dbSource */
         $dbSource = Instance::ensure('dbSource', Connection::class);
         $sourceSchema = $dbSource->schema;
 
