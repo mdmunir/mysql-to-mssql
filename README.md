@@ -42,4 +42,5 @@ Dua metode yang pertama akan menghapus terlebih dahulu isi tabel. Sedangkan meto
 #php yii mssql/export-merge <name> [...options...]
 
 ```
-![method-2](https://github.com/user-attachments/assets/ab0f2bf9-8775-472d-9fbc-ef88c54973fd)
+![method-3](https://github.com/user-attachments/assets/916405ee-c27f-4e8e-afdd-c02e8c15f0cd)
+
