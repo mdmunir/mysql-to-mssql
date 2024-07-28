@@ -412,11 +412,12 @@ class MssqlController extends Controller
                 $prefix = "SET IDENTITY_INSERT $quoteTo ON;\n";
             }
             $quoteColumnsList = implode(', ', $quoteColumns);
-            $primaryList = implode(", ", $primaries);
+            $primaryList = implode(" AND ", $primaries);
             $updateList = implode(",\n\t", $updates);
             $insertList = implode(",\n\t", $inserts);
 
-            $mergeSql = <<<SQL
+            if(count($updates)){
+                $mergeSql = <<<SQL
 {$prefix}MERGE INTO $quoteTo AS target
 USING (VALUES {{VALUES}}) AS source($quoteColumnsList)
 ON $primaryList
@@ -424,9 +425,19 @@ WHEN MATCHED THEN
     UPDATE SET
     $updateList
 WHEN NOT MATCHED THEN
-    INSERT ($quoteColumnsList) 
+    INSERT ($quoteColumnsList)
     VALUES ($insertList);
 SQL;
+            } else{
+                $mergeSql = <<<SQL
+{$prefix}MERGE INTO $quoteTo AS target
+USING (VALUES {{VALUES}}) AS source($quoteColumnsList)
+ON $primaryList
+WHEN NOT MATCHED THEN
+    INSERT ($quoteColumnsList)
+    VALUES ($insertList);
+SQL;
+            }
 
             $query = (new Query())
                 ->select($sourceColumns)
