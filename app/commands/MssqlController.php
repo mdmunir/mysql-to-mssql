@@ -35,7 +35,7 @@ class MssqlController extends Controller
      *
      * @var int row count per insert statement
      */
-    public $batchSize = 999;
+    public $batchSize = 100;
     /**
      * 
      * @var int max row per file
@@ -68,7 +68,8 @@ class MssqlController extends Controller
         $destSchema = $dbDest->schema;
 
         $total = 0;
-        foreach ($map as $from => $to) {
+        foreach ($map as $from => $config) {
+            $to = $config['to'];
             $tableSchema = $sourceSchema->getTableSchema($from);
             if (!$tableSchema) {
                 throw new InvalidArgumentException("Unknown table '$from'");
@@ -135,7 +136,7 @@ class MssqlController extends Controller
                 $line = $this->convertRow($row, $types);
                 $lines[] = "\t($line)";
                 if ($ii >= $this->batchSize) {
-                    $buffer .= $insert . implode(",\n", $lines).";\nGO\n\n";
+                    $buffer .= $insert . implode(",\n", $lines) . ";\nGO\n\n";
                     file_put_contents($fname, $buffer, FILE_APPEND);
                     $buffer = '';
                     $ii = 0;
@@ -146,7 +147,7 @@ class MssqlController extends Controller
                 }
             }
             if (count($lines)) {
-                $buffer .= $insert . implode(",\n", $lines).";\nGO\n\n";
+                $buffer .= $insert . implode(",\n", $lines) . ";\nGO\n\n";
                 file_put_contents($fname, $buffer, FILE_APPEND);
                 $buffer = '';
                 $lines = [];
@@ -213,15 +214,16 @@ class MssqlController extends Controller
                 ->count('*', $dbSource);
             $total += $count;
         }
-        
+
         $i = 0;
         $ii = 0;
         $done = 0;
         if ($this->progress) {
             Console::startProgress($done, $total);
         }
-        
-        foreach ($map as $from => $to) {
+
+        foreach ($map as $from => $config) {
+            $to = $config['to'];
             $tableSchema = $sourceSchema->getTableSchema($from);
             $columns = $tableSchema->columns;
             $sourceColumns = [];
@@ -307,6 +309,187 @@ class MssqlController extends Controller
         }
     }
 
+    /**
+     * Export data table directly to database using MERGE statement.
+     * @param string $name Task name
+     * @throws InvalidArgumentException
+     */
+    public function actionExportMerge($name)
+    {
+        $map = $this->parseTables($name);
+        if ($map === false) {
+            throw new InvalidArgumentException("Invalid '$name' parameter value.");
+        }
+        /** @var Connection $dbSource */
+        $dbSource = Instance::ensure('dbSource', Connection::class);
+        $sourceSchema = $dbSource->schema;
+
+        /** @var Connection $dbDest */
+        /** @var \yii\db\mssql\Schema $destSchema */
+        $dbDest = Instance::ensure('dbDest', Connection::class);
+        $destSchema = $dbDest->schema;
+        $destCommand = $dbDest->createCommand();
+
+        $total = 0;
+        $whereMap = [];
+        foreach ($map as $from => $config) {
+            $to = $config['to'];
+            $tableSchema = $sourceSchema->getTableSchema($from);
+            if (!$tableSchema) {
+                throw new InvalidArgumentException("Unknown table '$from'");
+            }
+            $where = [];
+            if ($keys = $tableSchema->primaryKey) {
+                if (!empty($config['begin'])) {
+                    $values = explode(',', $config['begin'], count($keys));
+                    foreach ($values as $i => $value) {
+                        $where[] = ['>=', $keys[$i], $value];
+                    }
+                }
+                if (!empty($config['end'])) {
+                    $values = explode(',', $config['end'], count($keys));
+                    foreach ($values as $i => $value) {
+                        $where[] = ['<=', $keys[$i], $value];
+                    }
+                }
+                if (count($where)) {
+                    array_unshift($where, 'AND');
+                    $whereMap[$from] = $where;
+                }
+            }
+
+            $query = (new Query())
+                ->from($from);
+            if ($where) {
+                $query->andWhere($where);
+            }
+            $count = $query->count('*', $dbSource);
+            $total += $count;
+        }
+
+        $PROGRESS_STEP = min($total / 1000, 1000);
+        $i = 0;
+        $ii = 0;
+        $done = 0;
+        $progress = 0;
+        if ($this->progress) {
+            Console::startProgress($done, $total);
+        }
+
+        foreach ($map as $from => $config) {
+            $to = $config['to'];
+            $tableSchema = $sourceSchema->getTableSchema($from);
+            $columns = $tableSchema->columns;
+            $sourceColumns = [];
+            $quoteColumns = [];
+            $types = [];
+            $orders = [];
+            $ii = 0;
+            $sequenceColumn = null;
+            $varId = null;
+            $quoteTo = $destSchema->quoteTableName($to);
+            $primaries = $updates = $inserts = [];
+            foreach ($columns as $column) {
+                $columnName = $destSchema->quoteColumnName($column->name);
+                $quoteColumns[] = $columnName;
+                $sourceColumns[] = $column->name;
+                $types[] = $column->type;
+                if ($column->isPrimaryKey) {
+                    $orders[$column->name] = SORT_ASC;
+                    $primaries[] = "target.$columnName = source.$columnName";
+                } else {
+                    $updates[] = "target.$columnName = source.$columnName";
+                }
+                $inserts[] = "source.$columnName";
+                if ($column->autoIncrement) {
+                    $sequenceColumn = $destSchema->quoteColumnName($column->name);
+                    $varId = Inflector::variablize($from . '_' . $column->name);
+                }
+            }
+
+            $prefix = '';
+            if ($sequenceColumn) {
+                $prefix = "SET IDENTITY_INSERT $quoteTo ON;\n";
+            }
+            $quoteColumnsList = implode(', ', $quoteColumns);
+            $primaryList = implode(", ", $primaries);
+            $updateList = implode(",\n\t", $updates);
+            $insertList = implode(",\n\t", $inserts);
+
+            $mergeSql = <<<SQL
+{$prefix}MERGE INTO $quoteTo AS target
+USING (VALUES {{VALUES}}) AS source($quoteColumnsList)
+ON $primaryList
+WHEN MATCHED THEN
+    UPDATE SET
+    $updateList
+WHEN NOT MATCHED THEN
+    INSERT ($quoteColumnsList) 
+    VALUES ($insertList);
+SQL;
+
+            $query = (new Query())
+                ->select($sourceColumns)
+                ->from($from);
+            if (isset($whereMap[$from])) {
+                $query->andWhere($whereMap[$from]);
+            }
+            if (count($orders)) {
+                $query->orderBy($orders);
+            }
+            $reader = $query->createCommand($dbSource)->query();
+            $reader->setFetchMode(PDO::FETCH_NUM);
+            $lines = [];
+            while ($row = $reader->read()) {
+                $ii++;
+                $i++;
+                $done++;
+                $progress++;
+                $line = $this->convertRow($row, $types);
+                $lines[] = "($line)";
+                if ($ii >= $this->batchSize) {
+                    $insertValues = implode(",\n\t", $lines);
+                    $sql = str_replace('{{VALUES}}', $insertValues, $mergeSql);
+                    $destCommand->setSql($sql)->execute();
+                    $ii = 0;
+                    $lines = [];
+                    if ($this->progress && $progress >= $PROGRESS_STEP) {
+                        Console::updateProgress($done, $total, $from);
+                        $progress = 0;
+                    }
+                }
+            }
+            if (count($lines)) {
+                $insertValues = implode(",\n\t", $lines);
+                $sql = str_replace('{{VALUES}}', $insertValues, $mergeSql);
+                $destCommand->setSql($sql)->execute();
+                $lines = [];
+                $ii = 0;
+                if ($this->progress) {
+                    Console::updateProgress($done, $total, $from);
+                    $progress = 0;
+                }
+            }
+
+            if ($sequenceColumn) {
+                $sql = "SET IDENTITY_INSERT $quoteTo OFF";
+                $destCommand->setSql($sql)->execute();
+//                $sql = <<<SQL
+//DECLARE @{$varId} INT;
+//SELECT @{$varId} = COALESCE(MAX({$sequenceColumn}),0)+1 FROM {$quoteTo};
+//
+//DBCC CHECKIDENT ('{$quoteTo}', RESEED, @{$varId});
+//GO
+//
+//SQL;
+//                $destCommand->setSql($sql)->execute();
+            }
+        }
+        if ($this->progress) {
+            Console::endProgress();
+        }
+    }
+
     protected function convertRow($row, $types)
     {
         // INSERT [dbo].[Hris_TCuti] ([ct_id], [ct_kode], [ct_tran], [mk_nopeg], [ct_from], [ct_to], [ct_korin], [ct_notes], [ct_address],
@@ -351,14 +534,28 @@ class MssqlController extends Controller
 
             $result = [];
             foreach ($lines as $line) {
+                $filters = [];
                 $line = trim($line);
-                if (strncmp($line, '#', 1) === 0) {
+                if (!$line || strncmp($line, '#', 1) === 0) {
                     continue;
                 }
-                $row = explode('=', $line, 2);
+                // parse filter
+                $parts = explode(';', $line);
+                for ($i = 1; $i < count($parts); $i++) {
+                    $part = trim($parts[$i]);
+                    if (empty($part)) {
+                        continue;
+                    }
+                    if (preg_match('/(begin|end)\s*=*\s*(.+)/', $part, $matches)) {
+                        $filters[$matches[1]] = $matches[2];
+                    }
+                }
+
+                $row = explode('=', $parts[0], 2);
                 $from = trim($row[0]);
                 $to = isset($row[1]) ? trim($row[1]) : false;
-                $result[$from] = empty($to) ? $from : $to;
+                $filters['to'] = empty($to) ? $from : $to;
+                $result[$from] = $filters;
             }
             return $result;
         }
@@ -372,6 +569,8 @@ class MssqlController extends Controller
             case 'export-to-file':
                 return array_merge($options, ['taskPath', 'outputPath', 'batchSize', 'maxLine', 'progress']);
             case 'export-copy':
+                return array_merge($options, ['taskPath', 'batchSize', 'progress']);
+            case 'export-merge':
                 return array_merge($options, ['taskPath', 'batchSize', 'progress']);
 
             default:
