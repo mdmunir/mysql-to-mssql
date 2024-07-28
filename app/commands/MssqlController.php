@@ -330,6 +330,7 @@ class MssqlController extends Controller
         $destSchema = $dbDest->schema;
         $destCommand = $dbDest->createCommand();
 
+        $beginTime = time();
         $total = 0;
         $whereMap = [];
         foreach ($map as $from => $config) {
@@ -499,6 +500,10 @@ SQL;
         if ($this->progress) {
             Console::endProgress();
         }
+
+        $totalTime = time() - $beginTime;
+        echo "\nTotal time: $totalTime -> ";
+        echo Yii::$app->formatter->asDuration($totalTime),"\n";
     }
 
     protected function convertRow($row, $types)
