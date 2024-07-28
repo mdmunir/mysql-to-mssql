@@ -54,7 +54,7 @@ class MssqlController extends Controller
      */
     public function actionExportToFile($name)
     {
-        $map = $this->parseTables($name);
+        $map = $this->parseTask($name);
         if ($map === false) {
             throw new InvalidArgumentException("Invalid '$name' parameter value.");
         }
@@ -189,7 +189,7 @@ class MssqlController extends Controller
      */
     public function actionExportCopy($name)
     {
-        $map = $this->parseTables($name);
+        $map = $this->parseTask($name);
         if ($map === false) {
             throw new InvalidArgumentException("Invalid '$name' parameter value.");
         }
@@ -316,7 +316,7 @@ class MssqlController extends Controller
      */
     public function actionExportMerge($name)
     {
-        $map = $this->parseTables($name);
+        $map = $this->parseTask($name);
         if ($map === false) {
             throw new InvalidArgumentException("Invalid '$name' parameter value.");
         }
@@ -541,7 +541,7 @@ SQL;
         return implode(", ", $line);
     }
 
-    protected function parseTables($task)
+    protected function parseTask($task)
     {
         $path = rtrim(Yii::getAlias($this->taskPath), '/');
         if (is_file("$path/$task")) {
